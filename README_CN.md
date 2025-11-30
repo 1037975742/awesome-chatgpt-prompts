@@ -1536,6 +1536,6 @@
   <img src="https://contrib.rocks/image?repo=f/awesome-chatgpt-prompts" />
 </a>
 
-# 许可证
+# 许可证  CN Version
 
 CC-0
