@@ -54,7 +54,7 @@ function createVariableInputs(variables, container) {
     const input = document.createElement("input");
     input.type = "text";
     input.className = "variable-input";
-    input.placeholder = variable.default || `Enter ${variable.name}`;
+    input.placeholder = variable.default || `请输入 ${variable.name}`;
     input.dataset.variable = variable.name;
     input.dataset.default = variable.default || "";
 
@@ -123,8 +123,116 @@ function updatePromptPreview(promptText, form) {
   return previewText;
 }
 
+let promptData = [];
+let forDevsFlags = [];
+const basePath =
+  typeof window !== "undefined" && window.__SITE_BASE__
+    ? window.__SITE_BASE__
+    : "";
+
+async function loadForDevsFlags() {
+  try {
+    const response = await fetch(`${basePath}/prompts.csv`);
+    const csvText = await response.text();
+    const prompts = parseCSV(csvText);
+    return prompts.map((item) => item.for_devs === true);
+  } catch (error) {
+    console.error("加载开发者标签失败：", error);
+    return [];
+  }
+}
+
+function extractContributor(contributorParagraph) {
+  if (!contributorParagraph) return "f";
+
+  const text = contributorParagraph.textContent.trim();
+  const formats = [
+    /贡献者[:：]?\s*\[@?([^\]\s]+)\]/i,
+    /贡献者[:：]?\s*@?([^\s]+)/i,
+    /Contributed by:?\s*\[@?([^\]\s]+)\]/i,
+    /Contributed by:?\s*@?([^\s]+)/i,
+  ];
+
+  for (const format of formats) {
+    const match = text.match(format);
+    if (match) {
+      return match[1].replace(/^@/, "");
+    }
+  }
+
+  return "f";
+}
+
+function collectPromptData(flags = []) {
+  const promptContainer =
+    document.getElementById("promptContent") || document;
+  const promptElements = promptContainer.querySelectorAll(
+    "h2 + p + blockquote"
+  );
+  const prompts = [];
+
+  promptElements.forEach((blockquote, index) => {
+    const titleElement = blockquote.previousElementSibling?.previousElementSibling;
+    if (!titleElement) return;
+
+    const title = titleElement.textContent.trim();
+    const content = blockquote.textContent.trim();
+    const contributor = extractContributor(blockquote.previousElementSibling);
+    const for_devs = Boolean(flags[index]);
+
+    prompts.push({
+      title,
+      content,
+      contributor,
+      for_devs,
+    });
+  });
+
+  return prompts;
+}
+
+async function loadPromptData() {
+  forDevsFlags = await loadForDevsFlags();
+  promptData = collectPromptData(forDevsFlags);
+}
+
+function getFilteredPrompts(searchTerm = "", isDevMode = false) {
+  const term = searchTerm.toLowerCase();
+  return promptData.filter((prompt) => {
+    const matchesSearch =
+      !term ||
+      prompt.title.toLowerCase().includes(term) ||
+      prompt.content.toLowerCase().includes(term);
+    const matchesDev = isDevMode ? prompt.for_devs === true : true;
+    return matchesSearch && matchesDev;
+  });
+}
+
+function updateCardVisibility(filteredPrompts) {
+  const filteredTitles = new Set(
+    filteredPrompts.map((prompt) => prompt.title.trim().toLowerCase())
+  );
+
+  document.querySelectorAll(".prompt-card").forEach((card) => {
+    if (card.classList.contains("contribute-card")) return;
+    const cardTitle = card
+      .querySelector(".prompt-title")
+      .textContent.trim()
+      .toLowerCase();
+    card.style.display = filteredTitles.has(cardTitle) ? "" : "none";
+  });
+}
+
+function isDeveloperMode() {
+  const audienceSelect = document.getElementById("audienceSelect");
+  const hasDevFlags = forDevsFlags.length > 0;
+  return (
+    hasDevFlags && audienceSelect && audienceSelect.value === "developers"
+  );
+}
+
 // Initialize everything after DOM loads
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   // Initialize audience selector and dev mode
   const audienceSelect = document.getElementById('audienceSelect');
   const initialAudience = localStorage.getItem('audience') || 'everyone';
@@ -164,11 +272,12 @@ document.addEventListener("DOMContentLoaded", () => {
       document.getElementById("starCount").textContent = stars.toLocaleString();
     })
     .catch((error) => {
-      console.error("Error fetching star count:", error);
+      console.error("获取 star 数失败：", error);
       document.getElementById("starCount").textContent = "129k+";
     });
 
-  // Create prompt cards
+  // Load prompt data and create cards
+  await loadPromptData();
   createPromptCards();
 
   // Initialize dark mode
@@ -200,56 +309,35 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // Search functionality
-async function initializeSearch() {
-  try {
-    const response = await fetch("/prompts.csv");
-    const csvText = await response.text();
-    const prompts = parseCSV(csvText);
+function initializeSearch() {
+  if (!promptData.length) return;
 
-    // Sort prompts alphabetically by act
-    prompts.sort((a, b) => a.act.localeCompare(b.act));
+  const searchInput = document.getElementById("searchInput");
+  if (!searchInput) return;
+  const isDevMode = isDeveloperMode();
 
-    const searchInput = document.getElementById("searchInput");
-    const searchResults = document.getElementById("searchResults");
-    const promptCount = document.getElementById("promptCount");
-    const isDevMode = document.getElementById("audienceSelect").value === "developers";
+  const filteredPrompts = getFilteredPrompts("", isDevMode);
+  const totalPrompts = isDevMode
+    ? promptData.filter((p) => p.for_devs === true).length
+    : promptData.length;
 
-    // Update prompt count
-    const totalPrompts = isDevMode
-      ? prompts.filter((p) => p.for_devs === true).length
-      : prompts.length;
-    updatePromptCount(totalPrompts, totalPrompts);
+  updatePromptCount(filteredPrompts.length, totalPrompts);
+  displaySearchResults(filteredPrompts);
+  updateCardVisibility(filteredPrompts);
 
-    // Show filtered prompts initially
-    const filteredPrompts = isDevMode
-      ? prompts.filter((p) => p.for_devs === true)
-      : prompts;
-    displaySearchResults(filteredPrompts);
+  searchInput.addEventListener("input", (e) => {
+    const searchTerm = e.target.value.toLowerCase();
+    const isDevMode = isDeveloperMode();
 
-    searchInput.addEventListener("input", (e) => {
-      const searchTerm = e.target.value.toLowerCase();
-      const isDevMode = document.getElementById("audienceSelect").value === "developers";
+    const filtered = getFilteredPrompts(searchTerm, isDevMode);
+    const total = isDevMode
+      ? promptData.filter((p) => p.for_devs === true).length
+      : promptData.length;
 
-      const filteredPrompts = prompts.filter((prompt) => {
-        const matchesSearch =
-          prompt.act.toLowerCase().includes(searchTerm) ||
-          prompt.prompt.toLowerCase().includes(searchTerm);
-
-        return isDevMode
-          ? matchesSearch && prompt.for_devs === true
-          : matchesSearch;
-      });
-
-      // Update count with filtered results
-      const totalPrompts = isDevMode
-        ? prompts.filter((p) => p.for_devs === true).length
-        : prompts.length;
-      updatePromptCount(filteredPrompts.length, totalPrompts);
-      displaySearchResults(filteredPrompts);
-    });
-  } catch (error) {
-    console.error("Error loading prompts:", error);
-  }
+    updatePromptCount(filtered.length, total);
+    displaySearchResults(filtered);
+    updateCardVisibility(filtered);
+  });
 }
 
 function updatePromptCount(filteredCount, totalCount) {
@@ -259,11 +347,11 @@ function updatePromptCount(filteredCount, totalCount) {
 
   if (filteredCount === totalCount) {
     promptCount.classList.remove("filtered");
-    countLabel.textContent = "All Prompts";
+    countLabel.textContent = "全部提示";
     countNumber.textContent = totalCount;
   } else {
     promptCount.classList.add("filtered");
-    countLabel.textContent = `Found ${filteredCount} of ${totalCount}`;
+    countLabel.textContent = `已筛选：${filteredCount}/${totalCount}`;
     countNumber.textContent = filteredCount;
   }
 }
@@ -324,17 +412,21 @@ function displaySearchResults(results) {
         <line x1="12" y1="8" x2="12" y2="16"></line>
         <line x1="8" y1="12" x2="16" y2="12"></line>
         </svg>
-        Add this prompt
+        把这个提示提交到仓库
     </a>
     `;
     searchResults.appendChild(li);
     return;
   }
 
-  results.forEach((result) => {
+  const sortedResults = [...results].sort((a, b) =>
+    a.title.localeCompare(b.title, "zh-Hans")
+  );
+
+  sortedResults.forEach((result) => {
     const li = document.createElement("li");
     li.className = "search-result-item";
-    li.textContent = result.act;
+    li.textContent = result.title;
     li.addEventListener("click", () => {
       // Find the prompt card with matching title
       const cards = document.querySelectorAll(".prompt-card");
@@ -407,7 +499,7 @@ function displaySearchResults(results) {
           }, 2000);
         }, 500); // Wait for scroll to complete
       } else {
-        console.log("Card not found for:", result.act);
+        console.log("Card not found for:", result.title);
       }
     });
     searchResults.appendChild(li);
@@ -416,71 +508,26 @@ function displaySearchResults(results) {
 
 // Function to filter prompts based on dev mode
 function filterPrompts() {
-  const isDevMode = document.getElementById("audienceSelect").value === "developers";
+  if (!promptData.length) return;
+
+  const isDevMode = isDeveloperMode();
   const searchInput = document.getElementById("searchInput");
   const searchTerm = searchInput.value.toLowerCase();
 
-  // Re-fetch and filter prompts
-  fetch("/prompts.csv")
-    .then((response) => response.text())
-    .then((csvText) => {
-      const prompts = parseCSV(csvText);
-      const filteredPrompts = prompts.filter((prompt) => {
-        const matchesSearch =
-          !searchTerm ||
-          prompt.act.toLowerCase().includes(searchTerm) ||
-          prompt.prompt.toLowerCase().includes(searchTerm);
+  const filteredPrompts = getFilteredPrompts(searchTerm, isDevMode);
+  const totalCount = isDevMode
+    ? promptData.filter((p) => p.for_devs).length
+    : promptData.length;
 
-        return isDevMode
-          ? matchesSearch && prompt.for_devs === true
-          : matchesSearch;
-      });
-
-      // Update count with filtered results
-      updatePromptCount(
-        filteredPrompts.length,
-        isDevMode
-          ? prompts.filter((p) => p.for_devs === true).length
-          : prompts.length
-      );
-      displaySearchResults(filteredPrompts);
-
-      // Update prompt cards visibility
-      const promptsGrid = document.querySelector(".prompts-grid");
-      if (promptsGrid) {
-        const cards = promptsGrid.querySelectorAll(
-          ".prompt-card:not(.contribute-card)"
-        );
-        cards.forEach((card) => {
-          const title = card.querySelector(".prompt-title").textContent.trim();
-          const matchingPrompt = prompts.find((p) => {
-            const pTitle = p.act
-              .replace(/\s+/g, " ")
-              .replace(/[\n\r]/g, "")
-              .trim();
-            const cardTitle = title
-              .replace(/\s+/g, " ")
-              .replace(/[\n\r]/g, "")
-              .trim();
-            return (
-              pTitle.toLowerCase() === cardTitle.toLowerCase() ||
-              pTitle.toLowerCase().includes(cardTitle.toLowerCase()) ||
-              cardTitle.toLowerCase().includes(pTitle.toLowerCase())
-            );
-          });
-
-          // Show card if not in dev mode or if it's a dev prompt in dev mode
-          card.style.display =
-            !isDevMode || (matchingPrompt && matchingPrompt.for_devs === true)
-              ? ""
-              : "none";
-        });
-      }
-    });
+  updatePromptCount(filteredPrompts.length, totalCount);
+  displaySearchResults(filteredPrompts);
+  updateCardVisibility(filteredPrompts);
 }
 
 // Update the modal initialization and event listeners
 function createPromptCards() {
+  if (!promptData.length) return;
+
   const container = document.querySelector(".container-lg.markdown-body");
   const promptsGrid = document.createElement("div");
   promptsGrid.className = "prompts-grid";
@@ -496,171 +543,107 @@ function createPromptCards() {
         <line x1="12" y1="8" x2="12" y2="16"></line>
         <line x1="8" y1="12" x2="16" y2="12"></line>
         </svg>
-        Add Your Prompt
+        提交你的提示
     </div>
     <p class="prompt-content" style="flex-grow: 1;">
-        Share your creative prompts with the community! Submit a pull request to add your prompts to the collection.
+        把你的创意提示分享给社区！提交一个 Pull Request，把它加入集合。
     </p>
-    <span class="contributor-badge">Contribute Now</span>
+    <span class="contributor-badge">立即贡献</span>
     </a>
 `;
   promptsGrid.appendChild(contributeCard);
 
-  // Fetch prompts.csv to get for_devs information
-  fetch("/prompts.csv")
-    .then((response) => response.text())
-    .then((csvText) => {
-      const prompts = parseCSV(csvText);
-      const isDevMode = document.getElementById("audienceSelect").value === "developers";
+  const isDevMode = isDeveloperMode();
 
-      const promptElements = document.querySelectorAll(
-        "h2[id^=act] + p + blockquote"
-      );
+  promptData.forEach((prompt) => {
+    const { title, content, contributor, for_devs } = prompt;
+    const card = document.createElement("div");
+    card.className = "prompt-card";
 
-      promptElements.forEach((blockquote) => {
-        const title =
-          blockquote.previousElementSibling.previousElementSibling.textContent.trim();
-        const content = blockquote.textContent.trim();
+    if (isDevMode && !for_devs) {
+      card.style.display = "none";
+    }
 
-        // Find matching prompt in CSV
-        const matchingPrompt = prompts.find((p) => {
-          const csvTitle = p.act
-            .replace(/\s+/g, " ")
-            .replace(/[\n\r]/g, "")
-            .trim();
-          const elementTitle = title
-            .replace(/\s+/g, " ")
-            .replace(/[\n\r]/g, "")
-            .trim();
-          return (
-            csvTitle.toLowerCase() === elementTitle.toLowerCase() ||
-            csvTitle.toLowerCase().includes(elementTitle.toLowerCase()) ||
-            elementTitle.toLowerCase().includes(csvTitle.toLowerCase())
-          );
-        });
-
-        // Extract contributor from the paragraph element
-        const contributorParagraph = blockquote.previousElementSibling;
-        const contributorText = contributorParagraph.textContent;
-        let contributor = null;
-
-        // Try different contributor formats
-        const formats = [
-          /Contributed by: \[([^\]]+)\]/i,
-          /Contributed by \[([^\]]+)\]/i,
-          /Contributed by: @([^\s]+)/i,
-          /Contributed by @([^\s]+)/i,
-          /Contributed by: \[@([^\]]+)\]/i,
-          /Contributed by \[@([^\]]+)\]/i,
-        ];
-
-        for (const format of formats) {
-          const match = contributorText.match(format);
-          if (match) {
-            contributor = match[1];
-            // Remove @ if it exists at the start
-            contributor = contributor.replace(/^@/, "");
-            break;
-          }
-        }
-
-        // Set default contributor to 'f' if none found
-        if (!contributor) {
-          contributor = "f";
-        }
-
-        const card = document.createElement("div");
-        card.className = "prompt-card";
-
-        // Set initial visibility based on dev mode
-        if (isDevMode && (!matchingPrompt || !matchingPrompt.for_devs)) {
-          card.style.display = "none";
-        }
-
-        card.innerHTML = `
-        <div class="prompt-title">
-            ${title}
-            <div class="action-buttons">
-            <button class="chat-button" title="Open in AI Chat" onclick="openInChat(this, '${encodeURIComponent(
-              updatePromptPreview(content.trim())
-            )}')">
-                <svg class="chat-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                </svg>
-                <svg class="terminal-icon" style="display: none;" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="4 17 10 11 4 5"></polyline>
-                <line x1="12" y1="19" x2="20" y2="19"></line>
-                </svg>
-            </button>
-            <button class="yaml-button" title="Show prompt.yml format" onclick="showYamlModal(event, '${encodeURIComponent(title)}', '${encodeURIComponent(content)}')">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                <polyline points="14 2 14 8 20 8"></polyline>
-                <line x1="16" y1="13" x2="8" y2="13"></line>
-                <line x1="16" y1="17" x2="8" y2="17"></line>
-                <polyline points="10 9 9 9 8 9"></polyline>
-                </svg>
-            </button>
-            <button class="copy-button" title="Copy prompt" onclick="copyPrompt(this, '${encodeURIComponent(
-              updatePromptPreview(content.trim())
-            )}')">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
-                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
-                </svg>
-            </button>
-            </div>
-        </div>
-        <p class="prompt-content">${updatePromptPreview(content)}</p>
-        <a href="https://github.com/${contributor}" class="contributor-badge" target="_blank" rel="noopener">@${contributor}</a>
-        `;
-
-        // Add click event for showing modal
-        card.addEventListener("click", (e) => {
-          if (
-            !e.target.closest(".copy-button") &&
-            !e.target.closest(".contributor-badge") &&
-            !e.target.closest(".yaml-button")
-          ) {
-            showModal(title, content);
-          }
-        });
-
-        const copyButton = card.querySelector(".copy-button");
-        copyButton.addEventListener("click", async (e) => {
-          e.stopPropagation();
-          try {
-            await navigator.clipboard.writeText(updatePromptPreview(content));
-            copyButton.innerHTML = `
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="20 6 9 17 4 12"></polyline>
+    card.innerHTML = `
+      <div class="prompt-title">
+        ${title}
+        <div class="action-buttons">
+          <button class="chat-button" title="在聊天中打开" onclick="openInChat(this, '${encodeURIComponent(
+            updatePromptPreview(content.trim())
+          )}')">
+            <svg class="chat-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
             </svg>
-            `;
-            setTimeout(() => {
-              copyButton.innerHTML = `
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                </svg>
-            `;
-            }, 2000);
-          } catch (err) {
-            alert("Failed to copy prompt to clipboard");
-          }
-        });
+            <svg class="terminal-icon" style="display: none;" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="4 17 10 11 4 5"></polyline>
+              <line x1="12" y1="19" x2="20" y2="19"></line>
+            </svg>
+          </button>
+          <button class="yaml-button" title="查看 prompt.yml 格式" onclick="showYamlModal(event, '${encodeURIComponent(
+            title
+          )}', '${encodeURIComponent(content)}')">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+              <polyline points="10 9 9 9 8 9"></polyline>
+            </svg>
+          </button>
+          <button class="copy-button" title="复制提示" onclick="copyPrompt(this, '${encodeURIComponent(
+            updatePromptPreview(content.trim())
+          )}')">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+              <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <p class="prompt-content">${updatePromptPreview(content)}</p>
+      <a href="https://github.com/${contributor}" class="contributor-badge" target="_blank" rel="noopener">@${contributor}</a>
+    `;
 
-        promptsGrid.appendChild(card);
-      });
-
-      container.innerHTML = "";
-      container.appendChild(promptsGrid);
-
-      // Initialize modal event listeners
-      initializeModalListeners();
-    })
-    .catch((error) => {
-      console.error("Error loading prompts:", error);
+    card.addEventListener("click", (e) => {
+      if (
+        !e.target.closest(".copy-button") &&
+        !e.target.closest(".contributor-badge") &&
+        !e.target.closest(".yaml-button")
+      ) {
+        showModal(title, content);
+      }
     });
+
+    const copyButton = card.querySelector(".copy-button");
+    copyButton.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(updatePromptPreview(content));
+        copyButton.innerHTML = `
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>
+        `;
+        setTimeout(() => {
+          copyButton.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+          `;
+        }, 2000);
+      } catch (err) {
+        alert("复制提示失败");
+      }
+    });
+
+    promptsGrid.appendChild(card);
+  });
+
+  container.innerHTML = "";
+  container.appendChild(promptsGrid);
+
+  initializeModalListeners();
 }
 
 function initializeModalListeners() {
@@ -699,13 +682,13 @@ function createModal() {
         <div class="modal-header">
         <h2 class="modal-title"></h2>
         <div class="modal-actions">
-            <button class="modal-copy-button" title="Copy prompt">
+            <button class="modal-copy-button" title="复制提示">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                 <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
             </svg>
             </button>
-            <button class="modal-close" title="Close">
+            <button class="modal-close" title="关闭">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -732,7 +715,7 @@ function createModal() {
                 <path d="M9 2v2"></path>
                 <path d="M9 20v2"></path>
             </svg>
-            Embed
+            生成嵌入
             </button>
             <button class="modal-chat-button" onclick="openModalChat()">
             <svg class="chat-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -742,7 +725,7 @@ function createModal() {
                 <polyline points="4 17 10 11 4 5"></polyline>
                 <line x1="12" y1="19" x2="20" y2="19"></line>
             </svg>
-            Start Chat
+            开始对话
             </button>
         </div>
         </div>
@@ -763,6 +746,9 @@ function showModal(title, content) {
 
   const modalTitle = modalOverlay.querySelector(".modal-title");
   const modalContent = modalOverlay.querySelector(".modal-content");
+  if (modalTitle) {
+    modalTitle.textContent = title;
+  }
 
   // Extract variables from content
   const variables = extractVariables(content);
@@ -793,7 +779,6 @@ function showModal(title, content) {
     // Insert variable container before content
     modalContent.parentElement.insertBefore(variableContainer, modalContent);
   } else {
-    modalTitle.textContent = title;
     modalContent.textContent = content;
   }
 
@@ -834,7 +819,7 @@ function showModal(title, content) {
         <polyline points="4 17 10 11 4 5"></polyline>
         <line x1="12" y1="19" x2="20" y2="19"></line>
         </svg>
-        Chat with ${platform.textContent}
+        使用 ${platform.textContent} 对话
     `;
     }
   }
@@ -852,7 +837,7 @@ function showModal(title, content) {
     const contributorBadge = promptCard.querySelector(".contributor-badge");
     if (contributorBadge) {
       modalContributor.href = contributorBadge.href;
-      modalContributor.textContent = `Contributed by ${contributorBadge.textContent}`;
+      modalContributor.textContent = `贡献者：${contributorBadge.textContent}`;
     }
   }
 
@@ -874,7 +859,7 @@ function showModal(title, content) {
         `;
       }, 2000);
     } catch (err) {
-      alert("Failed to copy prompt to clipboard");
+      alert("复制提示失败");
     }
   });
 
@@ -989,7 +974,7 @@ function openInChat(button, encodedPrompt) {
   window.open(url, "_blank");
 }
 
-function buildPrompt(encodedPrompt) {
+function buildPrompt(encodedPrompt, { includePreferences = true } = {}) {
   let promptText = decodeURIComponent(encodedPrompt);
 
   // If there's a modal open, use the current state of variables
@@ -1012,6 +997,10 @@ function buildPrompt(encodedPrompt) {
     }
   }
 
+  const tempDiv = document.createElement("div");
+  tempDiv.innerHTML = promptText;
+  promptText = tempDiv.textContent || tempDiv.innerText || promptText;
+
   // Clean up newlines and normalize whitespace
   promptText = promptText.replace(/\s+/g, ' ').trim();
 
@@ -1022,12 +1011,21 @@ function buildPrompt(encodedPrompt) {
   const customTone = document.getElementById('customTone');
   const audienceSelect = document.getElementById('audienceSelect');
 
-  const language = languageSelect.value === 'custom' ? customLanguage.value : languageSelect.value;
-  const tone = toneSelect.value === 'custom' ? customTone.value : toneSelect.value;
-  const audience = audienceSelect.value;
+  const languageLabel =
+    languageSelect.value === 'custom'
+      ? (customLanguage.value.trim() || '自定义语言')
+      : languageSelect.options[languageSelect.selectedIndex].textContent;
+  const toneLabel =
+    toneSelect.value === 'custom'
+      ? (customTone.value.trim() || '自定义语气')
+      : toneSelect.options[toneSelect.selectedIndex].textContent;
+  const audienceLabel =
+    audienceSelect.options[audienceSelect.selectedIndex]?.textContent || audienceSelect.value;
 
   // Append preferences as a new line
-  promptText += ` Reply in ${language} using ${tone} tone for ${audience}.`;
+  if (includePreferences) {
+    promptText += ` 请使用${languageLabel}，语气保持${toneLabel}，面向${audienceLabel}回复。`;
+  }
 
   return promptText;
 }
@@ -1047,7 +1045,7 @@ async function copyPrompt(button, encodedPrompt) {
       button.innerHTML = originalHTML;
     }, 2000);
   } catch (err) {
-    console.error("Failed to copy text: ", err);
+    console.error("复制文本失败: ", err);
   }
 }
 
@@ -1064,18 +1062,14 @@ function openModalChat() {
 function openEmbedDesigner() {
   const modalContent = document.querySelector(".modal-content");
   if (modalContent) {
-    let content = modalContent.textContent || modalContent.innerText;
-    
-    // If there's a variable form, get the processed content with variables
-    const form = document.querySelector(".variable-form");
-    if (form) {
-      content = buildPrompt(encodeURIComponent(content.trim()));
-      // Remove the added language/tone preferences for embed
-      content = content.replace(/\s*Reply in .+ using .+ tone for .+\.$/, '').trim();
-    }
-    
+    let content =
+      modalContent.textContent || modalContent.innerText || "";
+    content = buildPrompt(encodeURIComponent(content.trim()), {
+      includePreferences: false,
+    });
+
     // Build the embed URL
-    const embedUrl = `/embed/?prompt=${encodeURIComponent(content)}&context=https://prompts.chat&model=gpt-4o&agentMode=chat&thinking=false&max=false&height=400`;
+    const embedUrl = `${basePath}/embed/?prompt=${encodeURIComponent(content)}&context=${encodeURIComponent(window.location.origin)}&model=gpt-4o&agentMode=chat&thinking=false&max=false&height=400`;
     
     // Open in new tab
     window.open(embedUrl, '_blank');
@@ -1212,15 +1206,15 @@ function showYamlModal(event, title, content) {
       <div class="modal-overlay" id="yamlModalOverlay">
       <div class="modal">
           <div class="modal-header">
-          <h2 class="modal-title">Prompt YAML</h2>
+          <h2 class="modal-title">提示词 YAML</h2>
           <div class="modal-actions">
-              <button class="modal-copy-button" title="Copy YAML">
+              <button class="modal-copy-button" title="复制 YAML">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
               </svg>
               </button>
-              <button class="modal-close" title="Close">
+              <button class="modal-close" title="关闭">
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <line x1="18" y1="6" x2="6" y2="18"></line>
                   <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -1233,22 +1227,22 @@ function showYamlModal(event, title, content) {
           </div>
           <div class="modal-footer">
           <div class="modal-footer-left">
-              <span class="modal-hint">You can create a new <code>.prompt.yml</code> file in your GitHub repository.</span>
+              <span class="modal-hint">可以在你的 GitHub 仓库里直接创建 <code>.prompt.yml</code> 文件。</span>
           </div>
           <div class="modal-footer-right">
               <div class="github-form">
                 <div class="github-inputs">
-                  <input type="text" id="github-org" class="github-input" placeholder="Organization" value="">
+                  <input type="text" id="github-org" class="github-input" placeholder="组织/用户名" value="">
                   <span>/</span>
-                  <input type="text" id="github-repo" class="github-input" placeholder="Repository" value="">
+                  <input type="text" id="github-repo" class="github-input" placeholder="仓库" value="">
                   <span>#</span>
-                  <input type="text" id="github-branch" class="github-input" placeholder="Branch" value="main">
+                  <input type="text" id="github-branch" class="github-input" placeholder="分支" value="main">
                 </div>
                 <button class="create-yaml-button">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
                 </svg>
-                Create .prompt.yml
+                在 GitHub 创建 .prompt.yml
                 </button>
               </div>
           </div>
@@ -1326,7 +1320,7 @@ messages:
         `;
       }, 2000);
     } catch (err) {
-      alert("Failed to copy YAML to clipboard");
+      alert("复制 YAML 失败");
     }
   });
   
